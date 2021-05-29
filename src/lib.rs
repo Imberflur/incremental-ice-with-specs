@@ -1,43 +1,57 @@
-use specs::shred::Fetch;
-use specs::shred::MetaTable;
-use specs::storage::AnyStorage;
-use specs::storage::MaskedStorage;
-use specs::Component;
-use specs::Storage;
-use specs::World;
+use core::any::Any;
+use core::marker::PhantomData;
 
-pub type ReadStorage<'a, T> = Storage<'a, T, Fetch<'a, MaskedStorage<T>>>;
+struct DerefWrap<T>(T);
 
-trait System<'a> {
-    type SystemData;
-
-    fn run(data: Self::SystemData, world: &mut World);
+impl<T> core::ops::Deref for DerefWrap<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
+
+struct Storage<T, D> {
+    phantom: PhantomData<(T, D)>,
+}
+
+type ReadStorage<T> = Storage<T, DerefWrap<MaskedStorage<T>>>;
+
+pub trait Component {
+    type Storage;
+}
+
+struct VecStorage;
 
 struct Pos;
 
 impl Component for Pos {
-    type Storage = specs::VecStorage<Self>;
+    type Storage = VecStorage;
 }
 
-struct InterpBuffer<T> {
+struct GenericComp<T> {
     _t: T,
 }
 
-impl<T: 'static + Send + Sync> Component for InterpBuffer<T> {
-    type Storage = specs::VecStorage<Self>;
+impl<T: 'static> Component for GenericComp<T> {
+    type Storage = VecStorage;
 }
-struct ReadData<'a> {
-    pos_interpdata: ReadStorage<'a, InterpBuffer<Pos>>,
+struct ReadData {
+    pos_interpdata: ReadStorage<GenericComp<Pos>>,
+}
+
+trait System {
+    type SystemData;
+
+    fn run(data: Self::SystemData, any: Box<dyn Any>);
 }
 
 struct Sys;
 
-impl<'a> System<'a> for Sys {
-    type SystemData = (ReadData<'a>, ReadStorage<'a, Pos>);
+impl System for Sys {
+    type SystemData = (ReadData, ReadStorage<Pos>);
 
-    fn run((data, pos): Self::SystemData, world: &mut World) {
-        <ReadStorage<'a, InterpBuffer<Pos>> as SystemData>::setup(world);
+    fn run((data, pos): Self::SystemData, any: Box<dyn Any>) {
+        <ReadStorage<GenericComp<Pos>> as SystemData>::setup(any);
 
         ParJoin::par_join((&pos, &data.pos_interpdata));
     }
@@ -51,10 +65,10 @@ trait ParJoin {
     }
 }
 
-impl<'a, 'e, T, D> ParJoin for &'a specs::Storage<'e, T, D>
+impl<'a, T, D> ParJoin for &'a Storage<T, D>
 where
-    T: specs::Component,
-    D: core::ops::Deref<Target = specs::storage::MaskedStorage<T>>,
+    T: Component,
+    D: core::ops::Deref<Target = MaskedStorage<T>>,
     T::Storage: Sync,
 {
 }
@@ -66,27 +80,53 @@ where
 {
 }
 
-//
-//pub trait Component: Any + Sized {
-//    type Storage: UnprotectedStorage<Self> + Any + Send + Sync;
-//}
-
-pub trait SystemData<'a> {
-    /// Sets up the system data for fetching it from the `World`.
-    fn setup(world: &mut World);
+pub trait SystemData {
+    fn setup(any: Box<dyn Any>);
 }
 
-impl<'a, T> SystemData<'a> for ReadStorage<'a, T>
+impl<T: 'static> SystemData for ReadStorage<T>
 where
     T: Component,
 {
-    fn setup(res: &mut World) {
-        res.fetch_mut::<MetaTable<dyn AnyStorage>>()
-            .register(&*res.fetch::<MaskedStorage<T>>());
+    fn setup(mut any: Box<dyn Any>) {
+        let fetch: &mut (MetaTable<dyn Any>, MaskedStorage<T>) = any.downcast_mut().unwrap();
+
+        fetch.0.register(&fetch.1);
     }
 }
-/*
+
 pub struct MaskedStorage<T: Component> {
-    mask: specs::hibitset::BitSet,
-    inner: T::Storage,
-}*/
+    _inner: T::Storage,
+}
+
+struct Invariant<T: ?Sized>(*mut T);
+
+unsafe impl<T> Send for Invariant<T> where T: ?Sized {}
+
+unsafe impl<T> Sync for Invariant<T> where T: ?Sized {}
+
+pub unsafe trait CastFrom<T> {
+    fn cast(t: &T) -> &Self;
+}
+
+pub struct MetaTable<T: ?Sized> {
+    marker: PhantomData<Invariant<T>>,
+}
+
+impl<T: ?Sized> MetaTable<T> {
+    pub fn register<R>(&mut self, r: &R)
+    where
+        T: CastFrom<R> + 'static,
+    {
+        <T as CastFrom<R>>::cast(r);
+    }
+}
+
+unsafe impl<T> CastFrom<T> for dyn Any
+where
+    T: Any + 'static,
+{
+    fn cast(t: &T) -> &Self {
+        t
+    }
+}

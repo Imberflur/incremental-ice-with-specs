@@ -6,9 +6,4 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies.specs]
-version = "0.16.1"
-git = "https://github.com/amethyst/specs"
-rev = "1a113a85fb6283d23294a58c2ef749d41cad5deb"
-features = ["derive"]
 
